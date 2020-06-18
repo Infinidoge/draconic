@@ -34,8 +34,6 @@ class DraconicConfig:
             disallow_prefixes = DISALLOW_PREFIXES
         if disallow_methods is None:
             disallow_methods = DISALLOW_METHODS
-        if default_names is None:
-            default_names = self._default_names()
 
         self.max_const_len = max_const_len
         self.max_loops = max_loops
@@ -44,15 +42,36 @@ class DraconicConfig:
         self.max_power = max_power
         self.disallow_prefixes = disallow_prefixes
         self.disallow_methods = disallow_methods
-        self.default_names = default_names
         self.builtins_extend_default = builtins_extend_default
+
+        # types
+        self._list = safe_list(self)
+        self._dict = safe_dict(self)
+        self._set = safe_set(self)
+
+        # default names
+        if default_names is None:
+            default_names = self._default_names()
+        self.default_names = default_names
+
+    @property
+    def list(self):
+        return self._list
+
+    @property
+    def dict(self):
+        return self._dict
+
+    @property
+    def set(self):
+        return self._set
 
     def _default_names(self):
         return {
             "True": True, "False": False, "None": None,
             # functions
             "bool": bool, "int": int, "float": float, "str": str, "tuple": tuple,
-            "dict": safe_dict(self), "list": safe_list(self), "set": safe_set(self)
+            "dict": self.dict, "list": self.list, "set": self.set
         }
 
 
@@ -120,6 +139,9 @@ def approx_len_of(obj, visited=None):
     if isinstance(obj, str):
         return len(obj)
 
+    if hasattr(obj, "__approx_len__"):
+        return obj.__approx_len__
+
     if visited is None:
         visited = [obj]
 
@@ -137,6 +159,11 @@ def approx_len_of(obj, visited=None):
     except TypeError:  # object is not iterable
         pass
 
+    try:
+        setattr(obj, "__approx_len__", size)
+    except AttributeError:
+        pass
+
     return size
 
 
@@ -146,48 +173,114 @@ def approx_len_of(obj, visited=None):
 
 def safe_list(config):
     class SafeList(UserList):  # extends UserList so that [x] * y returns a SafeList, not a list
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.__approx_len__ = approx_len_of(self)
+
         def append(self, obj):
             if approx_len_of(self) + 1 > config.max_const_len:
                 _raise_in_context(IterableTooLong, "This list is too long")
             super().append(obj)
+            self.__approx_len__ += 1
 
         def extend(self, iterable):
-            if approx_len_of(self) + approx_len_of(iterable) > config.max_const_len:
+            other_len = approx_len_of(iterable)
+            if approx_len_of(self) + other_len > config.max_const_len:
                 _raise_in_context(IterableTooLong, "This list is too long")
             super().extend(iterable)
+            self.__approx_len__ += other_len
+
+        def pop(self, i=-1):
+            retval = super().pop(i)
+            self.__approx_len__ -= 1
+            return retval
+
+        def remove(self, item):
+            super().remove(item)
+            self.__approx_len__ -= 1
+
+        def clear(self):
+            super().clear()
+            self.__approx_len__ = 0
 
     return SafeList
 
 
 def safe_set(config):
     class SafeSet(set):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.__approx_len__ = approx_len_of(self)
+
         def update(self, *s):
-            if approx_len_of(self) + sum(approx_len_of(other) for other in s) > config.max_const_len:
+            other_lens = sum(approx_len_of(other) for other in s)
+            if approx_len_of(self) + other_lens > config.max_const_len:
                 _raise_in_context(IterableTooLong, "This set is too large")
             super().update(*s)
+            self.__approx_len__ += other_lens
 
         def add(self, element):
             if approx_len_of(self) + 1 > config.max_const_len:
                 _raise_in_context(IterableTooLong, "This set is too large")
             super().add(element)
+            self.__approx_len__ += 1
 
         def union(self, *s):
             if approx_len_of(self) + sum(approx_len_of(other) for other in s) > config.max_const_len:
                 _raise_in_context(IterableTooLong, "This set is too large")
             return SafeSet(super().union(*s))
 
+        def pop(self):
+            retval = super().pop()
+            self.__approx_len__ -= 1
+            return retval
+
+        def remove(self, element):
+            super().remove(element)
+            self.__approx_len__ -= 1
+
+        def discard(self, element):
+            super().discard(element)
+            self.__approx_len__ -= 1
+
+        def clear(self):
+            super().clear()
+            self.__approx_len__ = 0
+
     return SafeSet
 
 
 def safe_dict(config):
     class SafeDict(dict):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.__approx_len__ = approx_len_of(self)
+
         def update(self, other_dict=None, **kvs):
             if other_dict is None:
                 other_dict = {}
 
-            if approx_len_of(self) + approx_len_of(other_dict) + approx_len_of(kvs) > config.max_const_len:
+            other_lens = approx_len_of(other_dict) + approx_len_of(kvs)
+            if approx_len_of(self) + other_lens > config.max_const_len:
                 _raise_in_context(IterableTooLong, "This dict is too large")
 
             super().update(other_dict, **kvs)
+            self.__approx_len__ += other_lens
+
+        def __setitem__(self, key, value):
+            other_len = approx_len_of(value)
+            if approx_len_of(self) + other_len > config.max_const_len:
+                _raise_in_context(IterableTooLong, "This dict is too large")
+            self.__approx_len__ += other_len
+            return super().__setitem__(key, value)
+
+        def pop(self, k):
+            retval = super().pop(k)
+            self.__approx_len__ -= 1
+            return retval
+
+        def __delitem__(self, key):
+            super().__delitem__(key)
+            self.__approx_len__ -= 1
 
     return SafeDict
