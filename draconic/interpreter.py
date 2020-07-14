@@ -89,6 +89,10 @@ class SimpleInterpreter(OperatorMixin):
             return handler(node)
         except _PostponedRaise as pr:
             raise pr.cls(*pr.args, **pr.kwargs, node=node)
+        except DraconicException:
+            raise
+        except Exception as e:
+            raise AnnotatedException(e, node)
 
     def _preflight(self):
         """Called before starting evaluation."""
@@ -316,6 +320,9 @@ class DraconicInterpreter(SimpleInterpreter):
             return super().eval(expr)
         except self._Return as r:
             return r.value
+        except (self._Break, self._Continue):
+            raise DraconicSyntaxError(SyntaxError("Loop control outside loop",
+                                                  ("<string>", 1, 1, expr)))
 
     def execute(self, expr):
         """
@@ -331,6 +338,9 @@ class DraconicInterpreter(SimpleInterpreter):
             self._exec(expr)
         except self._Return as r:
             return r.value
+        except (self._Break, self._Continue):
+            raise DraconicSyntaxError(SyntaxError("Loop control outside loop",
+                                                  ("<string>", 1, 1, expr)))
 
     def _preflight(self):
         self._num_stmts = 0
